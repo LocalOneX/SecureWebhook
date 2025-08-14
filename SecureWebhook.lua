@@ -57,7 +57,7 @@ local function _optionalAssert(assertFn: (input: any) -> any)
 	assert(typeof(assertFn) == "function", `argument #1 expected type function, got {typeof(assertFn)} instead`) 
 	return function(input: any)
 		if input == nil then
-			return
+			return input
 		end
 		return assertFn(input)
 	end
