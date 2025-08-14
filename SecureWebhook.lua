@@ -35,7 +35,7 @@ export type webhook_body_schema = {
 local HttpService = game:GetService("HttpService")
 
 --- Config
-local DEBUG_ENABLED = true
+local DEBUG_ENABLED = false
 local WEBHOOK_PROXY_URL = "webhook.lewisakura.moe"
 local WEBHOOKS_API_URL = "https://discord.com/api/webhooks/"
 local TEST_URL = WEBHOOKS_API_URL.."ID/TOKEN" 
