@@ -1,40 +1,18 @@
---!strict 
---[=[
-    SecureWebhook.luau: Easy webhook use for studio
-    
-    It's much easier to use this instead of making a new
-    function for webhook in every script, this easily
-    encodes the webhook into a proxy aswell! 
-    
-    Default proxy set to https://webhook.newstargeted.com/
-    Embeded builder: https://discohook.org
-    
-    Usage: (ex) 
-    	--@variables
-		local __sw = require(game.ServerScriptService.SecureWebhook)
-	 	local WEBHOOK_URL = "https://discord.com/api/webhooks/ID/TOKEN"
-	 	
-	 	---self(...)
-		SecureWebhook(WEBHOOK_URL:: string, {content = "Hello World!"}:: SecureWebhook.body, false:: boolean?)
+--!strict
+--[[
+
+	SecureWebhook.luau; Optimized lightweight proxied webhook use for studio.
+	
+	Extremely easy to change the proxy and customize the module.
+	Default proxy url: https://webhook.lewisakura.moe/ 
 		
-		--self.generic(...)
-		module.generic(WEBHOOK_URL:: string, {content = "Hello World!"}:: SecureWebhook.body, false:: boolean?)
+	Rescripted the old version because the old version was a bit messy.
 		
-		--self.default(...)
-		module.default(WEBHOOK_URL:: string, "Hello World!":: string)
-    
-    v1.0.1 @LocalOnex
---]=] 
+	v1.1.0 @LocalOneX
+		
+]]
 
-local module = {}
-module.__index = module
-
----@reference
-local HttpService = game:GetService"HttpService"
-local TEST_URL = "https://discord.com/api/webhooks/ID/TOKEN"
-
----@types
-export type body = {
+export type webhook_body_schema = {
 	content: string?,
 	embeds: { 
 		{ 
@@ -54,127 +32,209 @@ export type body = {
 	tts: boolean?
 } 
 
----@config 
-local defaultQueue = false
-local proxy = true
-local proxyUrl = "webhook.newstargeted.com"
+local HttpService = game:GetService("HttpService")
 
+--- Config
+local DEBUG_ENABLED = true
+local WEBHOOK_PROXY_URL = "webhook.lewisakura.moe"
+local WEBHOOKS_API_URL = "https://discord.com/api/webhooks/"
+local TEST_URL = WEBHOOKS_API_URL.."ID/TOKEN" 
+local SUB_DOMAINS = {"ptb", "canary"}
 
----@internal 
+local module = {}
 
-local function fetchDetails(url: string): (string?, string?)
-	---@param url webhook url string
-	---@return str(id, token)
+--- Internal
+ 
+-- I am addicted to this type of asserting LOL
+local function _assertType(class: string)
+	assert(typeof(class) == "string", `argument #1 expected type string, got {typeof(class)} instead`) 
+	return function(input: any)
+		assert(typeof(input) == typeof(class), `(expected type {class} got {typeof(input)} instead)`)
+		return input
+	end
+end  
+local function _optionalAssert(assertFn: (input: any) -> any)
+	assert(typeof(assertFn) == "function", `argument #1 expected type function, got {typeof(assertFn)} instead`) 
+	return function(input: any)
+		if input == nil then
+			return
+		end
+		return assertFn(input)
+	end
+end 
+local function _assertTable(tbl: {[string]: (input: any) -> any})
+	assert(typeof(tbl) == "table", `argument #1 expected type table, got {typeof(tbl)} instead`)
+	for k, v in pairs(tbl) do
+		if typeof(k) ~= "string" then
+			error("string", 3)
+		end
+		if typeof(v) ~= "function" then
+			error("table", 3)
+		end
+	end
+	return function(input: any)
+		assert(typeof(input) == "table", `(expected type table got {typeof(input)} instead)`)
+		for k, assertFn in pairs(tbl) do
+			assertFn(input[k])
+		end
+	end
+end 
+local function _assertSpecialArray(assertFn: (input: any) -> any)
+	assert(typeof(assertFn) == "function", `argument #1 expected type function, got {typeof(assertFn)} instead`) 
+	return function(input: any)
+		assert(typeof(input) == "table", `(expected type table got {typeof(input)} instead)`)
+		for i, v in ipairs(input) do
+			assertFn(v)
+		end
+	end
+end
+local _assertString = _assertType("string")
+local _assertBoolean = _assertType("boolean")
+local _internalBodyAssert = _assertTable({
+	content = _assertString,
+	embeds = _optionalAssert(_assertSpecialArray(_assertTable({
+		title = _optionalAssert(_assertString),
+		description = _optionalAssert(_assertString),
+		url = _optionalAssert(_assertString),
+		color = _optionalAssert(_assertType("number")),
+		fields = _optionalAssert(_assertSpecialArray(_assertTable({
+			name = _assertString,
+			value = _assertString,
+			inline = _optionalAssert(_assertBoolean),
+		}))),
+		footer = _optionalAssert(_assertTable({
+			text = _assertString, 
+			icon_url = _optionalAssert(_assertString),
+		})),
+		thumbnail = _optionalAssert(_assertTable({url = _assertString})),
+		image = _optionalAssert(_assertTable({url = _assertString})),
+		author = _optionalAssert(_assertTable({
+			name = _assertString, 
+			url = _optionalAssert(_assertString), 
+			icon_url = _optionalAssert(_assertString),
+		})),
+	}))),
+	username = _optionalAssert(_assertString),
+	avatar_url = _optionalAssert(_assertString),
+	tts = _optionalAssert(_assertBoolean) 
+})
 
-	---@asserts
-	assert(typeof(url) == "string") 
-
-	return unpack(url:gsub("https://discord.com/api/webhooks/", ""):split("/")) --url:match("https://discord.com/api/webhooks/(%w+)/(%w+)") 
+--[[
+	Fetch a webhooks token & server id details from the url. 
+]]
+local function _details(url: string)
+	_assertString(url)
+	
+	if DEBUG_ENABLED then
+		warn('webhook_url',url)
+	end
+	
+	if url:find("http://") then
+		url = url:gsub("http://", "https://")
+	end 
+	
+	if DEBUG_ENABLED then
+		warn('webhook_url2',url)
+	end
+	
+	for _, domain in ipairs(SUB_DOMAINS) do
+		domain ..= ".discord"
+		if url:find(domain) then
+			url = url:gsub(domain, "")
+			break
+		end
+	end
+	
+	if DEBUG_ENABLED then
+		warn('webhook_url3',url)
+	end
+	
+	assert(url:find(WEBHOOKS_API_URL), "Invalid url")
+	url = url:gsub(WEBHOOKS_API_URL, "")
+	
+	local SERVER_ID, WEBHOOK_TOKEN = table.unpack(url:split("/"))
+	_assertString(SERVER_ID)
+	_assertString(WEBHOOK_TOKEN)
+	
+	if DEBUG_ENABLED then
+		warn(SERVER_ID, WEBHOOK_TOKEN)
+	end
+	return SERVER_ID, WEBHOOK_TOKEN
 end
 
-local function toproxy(url: string, postQueue: boolean?): string
-	---@param url webhook url string
-	---@param postQueue should this post in a queue?
-	---@return str (proxy url)
-
-	---@asserts
-	assert(typeof(url) == "string")
-	assert(typeof(postQueue) == "nil" or typeof(postQueue) == "boolean")
-
-	---if it is already a proxy, return.
-	if url:find(proxyUrl) then
-		return url
-	end 
-
-	---if nil set it to the default val
-	if postQueue == nil then
-		postQueue = defaultQueue
-	end
-
-	---DETAILS Id and Token
-	local WEBHOOK_ID, WEBHOOK_TOKEN = fetchDetails(url)
-	assert(WEBHOOK_ID and WEBHOOK_TOKEN, "[SecureWebhook.fetchDetails] FAILURE")
-
-	---
-	local proxy = table.concat({
-		"https://",proxyUrl,"/api/webhooks/",WEBHOOK_ID,"/",WEBHOOK_TOKEN,
-		postQueue and "/queue" or ""
-	}) 
-
-	return proxy
-end 
-
-local function post(url: string, body: any, postQueue: boolean?): (...any)
-	---@param url webhook url string
-	---@param body the message content (content, embeds, etc)
-	---@param postQueue should this post in a queue?
-	---@return bool (success) response (status)
-
-	---@asserts
-	assert(typeof(url) == "string")
-	assert(body ~= nil)
-
-	---@vars
-	body = HttpService:JSONEncode(body)
-	url = toproxy(url, postQueue) 
-	warn(url)
+--[[
+	Get the webhooks proxy url.
+]]
+local function _proxy(url: string, queue: boolean?)
+	_assertString(url)
+	_optionalAssert(_assertBoolean)(queue) 
 	
-	---
-	local success, response  = pcall(function()
-		return HttpService:RequestAsync {
-			Url = url, 
-			Method = "POST", 
-			Headers = {
-				["Content-Type"] = "application/json"
-			}, 
-			Body = body
-		}
-	end)
-
-	if success and response .Success then
-		return true, response .StatusCode, response .Body
+	if url:find(WEBHOOK_PROXY_URL) then
+		return url
 	end
+	
+	local SERVER_ID, WEBHOOK_TOKEN = _details(url)
+	local PROXY_URL = `https://{WEBHOOK_PROXY_URL}/api/webhooks/{SERVER_ID}/{WEBHOOK_TOKEN}{queue and "/queue" or ""}`
+	
+	if DEBUG_ENABLED then
+		warn('proxy',PROXY_URL)
+	end
+	return PROXY_URL
+end
 
-	return false, response and response.StatusMessage or "Unknown error"
-end 
+--[[
+	Post the webhook through the proxy api.
+]]
+local function _post(url: string, body: webhook_body_schema, queue: boolean?)
+	_assertString(url)
+	_internalBodyAssert(body)
+	_optionalAssert(_assertBoolean)(queue)
+	
+	local success, encodedBody = pcall(HttpService.JSONEncode, HttpService, body)
+	if not success then
+		error(encodedBody, 3)
+	end
+	 
+	local success, response = pcall(HttpService.RequestAsync, HttpService, {
+		Url = _proxy(url, queue),
+		Method = "POST",
+		Headers = {
+			["Content-Type"] = "application/json"
+		},
+		Body = encodedBody
+	})
+	
+	if not success then
+		error(response, 3)
+	end 
+	
+	if DEBUG_ENABLED then
+		warn(success, response)
+	end
+end
 
+--- External
 
----@external 
+--[[
+	Post the webhook through the proxy api.
+]]
+function module:Post(url: string, body: webhook_body_schema, queue: boolean?)
+	return _post(url, body, queue)
+end
 
+--[[
+	Post a string to the webhook.
+]]
+function module:PostContent(url: string, content: string, queue: boolean?)
+	_assertString(content)
+	
+	local body = {content = content}
+	return _post(url, body, queue)
+end
 
----@generic this is what's generally used.
-function module.generic(url: string, body: any, postQueue: boolean?)
-	---@param url webhook url string
-	---@param body the message content (content, embeds, etc)
-	---@param postQueue should this post in a queue?
-	---@return bool (success) response (status)
-	return post(url, body, postQueue)
-end 
-
----@default post whenever you just want to send a str to the webhook.
-function module.default(url: string, content: any)
-	---@param url webhook url string
-	---@param content the message content  
-	---@return bool (success) response (status)
-	return post(url, {content = content})
-end  
-
---@self() this is just the lazy version of .generic(...)
-function module.__call(self, url: string, body: any, postQueue: boolean?)
-	---@param url webhook url string
-	---@param body the message content (content, embeds, etc)
-	---@param postQueue should this post in a queue?
-	---@return bool (success) response (status)
-	return module.generic(url, body, postQueue)
-end    
-
----@tests
-print(fetchDetails(TEST_URL))
-assert(select(1, fetchDetails(TEST_URL)) == "ID")
-assert(select(2, fetchDetails(TEST_URL)) == "TOKEN")
-assert(toproxy(TEST_URL)=="https://webhook.newstargeted.com/api/webhooks/ID/TOKEN")
-
----@return self/SecureWebhook
-module = setmetatable(module, module) 
-table.freeze(module)
+setmetatable(module, {
+	__newindex = function(self, k, v)
+		error(`{k} is not a valid member of {tostring(module)}`, 3)
+	end,
+})
 return module
